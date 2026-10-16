@@ -1,0 +1,20 @@
+{
+  "name": "Salat — Horaires de prière",
+  "short_name": "Salat",
+  "description": "Horaires de prière, adhan et direction de la Qibla, disponibles hors ligne.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#070d18",
+  "theme_color": "#070d18",
+  "lang": "fr",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
