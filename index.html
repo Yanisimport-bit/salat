@@ -432,12 +432,6 @@ function getCachedDay(date){
   return m.data.find(d => String(parseInt(d.date.gregorian.day,10)) === day) || null;
 }
 
-function monthAge(key){
-  const store = loadCalStore();
-  const m = store.months[key];
-  return m ? (Date.now() - (m.ts || 0)) : Infinity;
-}
-
 async function fetchMonth(year, month){
   const url = `https://api.aladhan.com/v1/calendar/${year}/${month}`
             + `?latitude=${state.lat}&longitude=${state.lng}&method=${state.method}`;
@@ -451,12 +445,12 @@ async function fetchMonth(year, month){
 async function ensureMonth(key){
   const store = loadCalStore();
   const existing = store.months[key];
-  const FRESH = 21 * 24 * 3600 * 1000; // 21 jours
+  const FRESH = 21 * 24 * 3600 * 1000;
 
   if(existing && Date.now() - (existing.ts||0) < FRESH) return;
 
   if(!state.online){
-    if(existing) return;   // utilise le cache
+    if(existing) return;
     throw new Error('offline');
   }
   try{
@@ -467,7 +461,7 @@ async function ensureMonth(key){
     s.months[key] = { data, ts: Date.now() };
     saveCalStore(s);
   }catch(err){
-    if(!existing) throw err;  // pas de filet de sécurité
+    if(!existing) throw err;
   }
 }
 
@@ -503,6 +497,7 @@ async function loadTimes(){
 
     loadedDay = now.toDateString();
     state.fired.clear();
+    lastCheck = Date.now();
 
     renderList();
     tick(true);
@@ -601,7 +596,7 @@ function tick(force){
 
   for(const p of PRAYERS){
     const ts = timeToDate(state.today[p.key], now).getTime();
-    if(ts > lastCheck && ts <= nowMs) fireAdhan(p, ts);
+    if(ts > lastCheck && ts <= nowMs) fireAdhan(p, ts, false);
   }
   lastCheck = nowMs;
 
@@ -622,6 +617,38 @@ function tick(force){
   const m = Math.floor((diff % 3600000) / 60000);
   const s = Math.floor((diff % 60000) / 1000);
   $('#countdown').textContent = `${two(h)}:${two(m)}:${two(s)}`;
+}
+
+/* ---------- Réveil à la reprise (iOS gèle le JS) ---------- */
+function wakeUp(){
+  if(document.visibilityState !== 'visible') return;
+
+  if(!state.today){
+    if(state.lat != null) loadTimes();
+    return;
+  }
+
+  const now = new Date();
+
+  // Changement de jour pendant l'absence
+  if(loadedDay && loadedDay !== now.toDateString()){
+    loadTimes();
+    return;
+  }
+
+  // Prières passées pendant l'absence
+  const nowMs = now.getTime();
+  const TOLERANCE = 2 * 60 * 1000; // 2 min : au-delà on marque "vu" sans sonner
+  for(const p of PRAYERS){
+    const ts = timeToDate(state.today[p.key], now).getTime();
+    if(ts > lastCheck && ts <= nowMs){
+      const late = (nowMs - ts) < TOLERANCE;
+      fireAdhan(p, ts, !late); // silent si en retard
+    }
+  }
+
+  lastCheck = nowMs;
+  tick(true);
 }
 
 /* ---------- Audio ---------- */
@@ -659,7 +686,7 @@ function playAdhan(){
   playChime();
 }
 
-/* ---------- Notifications (PWA iOS compatible) ---------- */
+/* ---------- Notifications ---------- */
 async function notify(title, body){
   if(!state.notifOn) return;
   if(!('Notification' in window)) return;
@@ -675,20 +702,21 @@ async function notify(title, body){
   }catch(e){ console.warn('notif', e); }
 }
 
-function fireAdhan(prayer, ts){
+function fireAdhan(prayer, ts, silent){
   const id = `${prayer.key}-${ts}`;
   if(state.fired.has(id)) return;
   state.fired.add(id);
 
-  if(state.adhanOn) playAdhan();
+  if(!silent){
+    if(state.adhanOn) playAdhan();
+    const hero = $('#hero');
+    hero.classList.remove('pulse');
+    void hero.offsetWidth;
+    hero.classList.add('pulse');
+    toast(`🕌 Il est l'heure de ${prayer.fr}`);
+  }
   notify(`🕌 Il est l'heure de ${prayer.fr}`,
          `${prayer.ar} · ${state.city || 'votre position'}`);
-
-  const hero = $('#hero');
-  hero.classList.remove('pulse');
-  void hero.offsetWidth;
-  hero.classList.add('pulse');
-  toast(`🕌 Il est l'heure de ${prayer.fr}`);
 }
 
 /* ---------- Géolocalisation ---------- */
@@ -724,7 +752,6 @@ async function fetchQibla(){
     const r = await fetch(`https://api.aladhan.com/v1/qibla/${state.lat}/${state.lng}`);
     const j = await r.json();
     state.qibla = j.data.direction;
-    // Mise en cache locale pour usage hors ligne
     try{ localStorage.setItem('salat.qibla.'+locKey(), String(state.qibla)); }catch(e){}
     renderQibla();
   }catch(e){
@@ -816,7 +843,6 @@ function initSettingsUI(){
   nt.onclick = async () => {
     if(!canNotif){ toast('Notifications non supportées ici'); return; }
     if(state.notifOn){ state.notifOn = false; nt.classList.remove('on'); saveSettings(); return; }
-    // iOS : la demande doit être déclenchée par un geste utilisateur
     const p = await Notification.requestPermission();
     state.notifOn = (p === 'granted');
     nt.classList.toggle('on', state.notifOn);
@@ -873,7 +899,6 @@ async function registerSW(){
   if(!('serviceWorker' in navigator)) return;
   try{
     const reg = await navigator.serviceWorker.register('./sw.js', { scope:'./' });
-    // Vérifie les mises à jour à chaque lancement
     reg.update().catch(() => {});
   }catch(e){ console.warn('SW', e); }
 }
@@ -886,9 +911,13 @@ function init(){
   maybeShowInstall();
   registerSW();
 
-  // Unlock audio au premier geste
   const unlock = () => { ensureCtx(); document.removeEventListener('pointerdown', unlock); };
   document.addEventListener('pointerdown', unlock);
+
+  // Réveil à la reprise
+  document.addEventListener('visibilitychange', wakeUp);
+  window.addEventListener('focus', wakeUp);
+  window.addEventListener('pageshow', wakeUp);
 
   if(state.lat != null){
     $('#location').textContent = state.city || `${state.lat.toFixed(3)}, ${state.lng.toFixed(3)}`;
@@ -900,7 +929,6 @@ function init(){
   }
 
   setInterval(tick, 1000);
-  // Recharge les données toutes les 6 h si l'app reste ouverte
   setInterval(() => { if(state.lat != null) loadTimes(); }, 6 * 3600 * 1000);
 }
 
